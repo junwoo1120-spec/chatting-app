@@ -214,6 +214,19 @@
       text-align: center;
     }
 
+    .badge { font-size: 11px; padding: 1px 6px; margin-left: 6px; border-radius: 999px; background: var(--mine); color: var(--mine-ink); }
+    .kick { margin-left: auto; border: 1px solid var(--line); background: transparent; color: var(--danger); border-radius: 6px; padding: 2px 8px; font-size: 12px; cursor: pointer; }
+    .restored-tag { font-size: 11.5px; color: var(--muted); margin: 0 4px 3px; }
+    .admin-btn { border: 1px solid var(--line); background: transparent; border-radius: 999px; padding: 5px 12px; cursor: pointer; font-size: 14px; margin-right: 8px; }
+    .drawer { position: fixed; inset: 0 0 0 auto; width: min(360px, 100vw); background: var(--panel); border-left: 1px solid var(--line); z-index: 20; display: flex; flex-direction: column; padding-top: env(safe-area-inset-top, 0px); }
+    .drawer header { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+    .drawer ul { list-style: none; margin: 0; padding: 8px; overflow-y: auto; }
+    .drawer li { padding: 10px; border-bottom: 1px solid var(--line); }
+    .drawer .meta { font-size: 12.5px; color: var(--muted); margin-bottom: 4px; }
+    .drawer .text { overflow-wrap: anywhere; margin-bottom: 8px; }
+    .drawer button { border: 0; background: var(--mine); color: var(--mine-ink); border-radius: 6px; padding: 4px 12px; cursor: pointer; }
+    .drawer .empty { padding: 20px 16px; color: var(--muted); }
+
     /* ---------- 모바일 ---------- */
     @media (max-width: 720px) {
       .app { grid-template-columns: 1fr; }
@@ -245,6 +258,9 @@
         <input id="nickInput" type="text" maxlength="12" placeholder="최대 12자" autocomplete="off" autofocus />
         <button type="submit" id="joinBtn">입장하기</button>
       </div>
+      <div class="field" id="pwField" hidden style="margin-top: 8px">
+        <input id="pwInput" type="password" placeholder="개발자 비밀번호" autocomplete="current-password" />
+      </div>
       <div class="error" id="joinError" role="alert"></div>
     </form>
   </section>
@@ -259,9 +275,12 @@
     <div class="main">
       <div class="topbar">
         <strong>채팅방</strong>
-        <button class="users-toggle" id="usersToggle" type="button">
-          <span class="dot"></span><span id="userCountBtn">0명</span>
-        </button>
+        <div>
+          <button class="admin-btn" id="deletedBtn" type="button" hidden>삭제된 메시지 <span id="deletedCount">0</span></button>
+          <button class="users-toggle" id="usersToggle" type="button">
+            <span class="dot"></span><span id="userCountBtn">0명</span>
+          </button>
+        </div>
       </div>
       <div class="conn-banner" id="connBanner" hidden>연결이 끊겼어요. 다시 연결하는 중…</div>
       <div class="messages" id="messages" aria-live="polite"></div>
@@ -272,6 +291,12 @@
     </div>
   </div>
 
+  <aside class="drawer" id="drawer" hidden>
+    <header><strong>삭제된 메시지</strong><button type="button" id="drawerClose">닫기</button></header>
+    <ul id="deletedList"></ul>
+    <div class="empty" id="deletedEmpty">삭제된 메시지가 없어요.</div>
+  </aside>
+
   <script src="/socket.io/socket.io.js"></script>
   <script>
     const socket = io();
@@ -280,6 +305,16 @@
     let myId = null;
     let myNickname = null;
     let lastSenderId = null;
+    let myPassword = "";
+    let isAdmin = false;
+    let kicked = false;
+
+    function badge(text) {
+      const el = document.createElement("span");
+      el.className = "badge";
+      el.textContent = text;
+      return el;
+    }
 
     const joinSection = $("#join");
     const appSection = $("#app");
@@ -311,11 +346,14 @@
     }
 
     // ---------- 입장 ----------
-    function join(nickname, onFail) {
-      socket.emit("join", nickname, (res) => {
-        if (!res.ok) return onFail(res.error);
+    function join(nickname, password, onFail) {
+      socket.emit("join", nickname, password, (res) => {
+        if (!res.ok) return onFail(res);
         myId = res.id;
         myNickname = res.nickname;
+        myPassword = password;
+        isAdmin = res.isAdmin;
+        $("#deletedBtn").hidden = !isAdmin;
         joinSection.hidden = true;
         appSection.hidden = false;
         $("#msgInput").focus();
@@ -331,8 +369,12 @@
       }
       joinBtn.disabled = true;
       joinError.textContent = "";
-      join(nickname, (error) => {
-        joinError.textContent = error;
+      kicked = false;
+      if (!socket.connected) socket.connect();
+      join(nickname, $("#pwInput").value, (res) => {
+        joinError.textContent = res.error;
+        $("#pwField").hidden = !res.needPassword;
+        if (res.needPassword) $("#pwInput").focus();
         joinBtn.disabled = false;
       });
     });
@@ -353,11 +395,18 @@
       const wrap = document.createElement("div");
       wrap.className = "bubble-wrap";
 
-      if (!mine && isFirstOfGroup) {
+      if (!mine && (isFirstOfGroup || msg.restored)) {
         const sender = document.createElement("div");
         sender.className = "sender";
         sender.textContent = msg.nickname;
+        if (msg.isAdmin) sender.appendChild(badge("개발자"));
         wrap.appendChild(sender);
+      }
+      if (msg.restored) {
+        const tag = document.createElement("div");
+        tag.className = "restored-tag";
+        tag.textContent = "복구된 메시지";
+        wrap.appendChild(tag);
       }
 
       const bubble = document.createElement("div");
@@ -405,6 +454,7 @@
         const name = document.createElement("span");
         name.className = "name";
         name.textContent = u.nickname;
+        if (u.isAdmin) name.appendChild(badge("개발자"));
         li.append(makeAvatar(u.nickname), name);
 
         if (u.id === myId) {
@@ -412,6 +462,15 @@
           tag.className = "me-tag";
           tag.textContent = "나";
           li.appendChild(tag);
+        } else if (isAdmin && !u.isAdmin) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "kick";
+          btn.textContent = "강퇴";
+          btn.addEventListener("click", () => {
+            if (confirm(`${u.nickname}님을 강퇴할까요?`)) socket.emit("kick", u.id);
+          });
+          li.appendChild(btn);
         }
         userListEl.appendChild(li);
       }
@@ -429,13 +488,57 @@
     socket.on("system", addSystem);
     socket.on("users", renderUsers);
 
-    socket.on("disconnect", () => { $("#connBanner").hidden = false; });
+    socket.on("disconnect", () => { if (!kicked) $("#connBanner").hidden = false; });
+
+    socket.on("blocked", (reason) => addSystem(`${reason} 때문에 메시지가 삭제됐어요.`));
+
+    socket.on("kicked", ({ minutes }) => {
+      kicked = true;
+      myNickname = null;
+      appSection.hidden = true;
+      joinSection.hidden = false;
+      joinBtn.disabled = false;
+      joinError.textContent = `개발자에 의해 강퇴됐어요. ${minutes}분 뒤에 다시 들어올 수 있어요.`;
+    });
+
+    // 개발자 전용: 삭제된 메시지 목록
+    const deletedItems = new Map();
+    function renderDeleted() {
+      const list = $("#deletedList");
+      list.replaceChildren();
+      for (const m of deletedItems.values()) {
+        const li = document.createElement("li");
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = `${m.nickname}님, ${formatTime(m.time)}, ${m.reason}`;
+        const text = document.createElement("div");
+        text.className = "text";
+        text.textContent = m.text;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = "복구";
+        btn.addEventListener("click", () => socket.emit("restore", m.id));
+        li.append(meta, text, btn);
+        list.appendChild(li);
+      }
+      $("#deletedCount").textContent = deletedItems.size;
+      $("#deletedEmpty").hidden = deletedItems.size > 0;
+    }
+    socket.on("deletedList", (items) => {
+      deletedItems.clear();
+      items.forEach((m) => deletedItems.set(m.id, m));
+      renderDeleted();
+    });
+    socket.on("deleted", (m) => { deletedItems.set(m.id, m); renderDeleted(); });
+    socket.on("deletedRemoved", (id) => { deletedItems.delete(id); renderDeleted(); });
+    $("#deletedBtn").addEventListener("click", () => { $("#drawer").hidden = false; });
+    $("#drawerClose").addEventListener("click", () => { $("#drawer").hidden = true; });
 
     // 연결이 끊겼다 복구되면 같은 닉네임으로 다시 입장
     socket.on("connect", () => {
       $("#connBanner").hidden = true;
       if (!myNickname) return;
-      join(myNickname, () => {
+      join(myNickname, myPassword, () => {
         // 닉네임을 다른 사람이 가져간 경우 처음 화면으로
         myNickname = null;
         appSection.hidden = true;
